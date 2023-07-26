@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <esp_adc_cal.h>
 /// --------- /////
 #include "Adafruit_SGP30.h"
 #include <SPI.h>
@@ -13,6 +14,7 @@
 #include "SharpGP2Y10.h"
 #include <WiFi.h>
 #include <FirebaseESP32.h>
+
 // set nguong
 long variables[3] = { 1000, 1000, 1000 };
 // define sensor 
@@ -33,6 +35,7 @@ volatile long encoderValue = 0;
 int selectedThreshSensor = 0;
 // MQ135
 #define MQ135_pin 39
+double R0;
 // oled
 #define SCREEN_WIDTH 128     // OLED display width, in pixels
 #define SCREEN_HEIGHT 64     // OLED display height, in pixels
@@ -48,7 +51,7 @@ int selectedThreshSensor = 0;
 Adafruit_SH1106G display = Adafruit_SH1106G(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 DHT dht(DHT_Pin, DHT_Type);
 Adafruit_SGP30 sgp;
-MQ135 mq135 = MQ135(MQ135_pin);
+//MQ135 mq135 = MQ135(MQ135_pin);
 SharpGP2Y10 dustSensor(voPin, ledPin);
 FirebaseData fbdo;
 // put function declarations here:
@@ -58,6 +61,75 @@ uint32_t getAbsoluteHumidity(float temperature, float humidity) {
   const uint32_t absoluteHumidityScaled = static_cast<uint32_t>(1000.0f * absoluteHumidity);                                                                 // [mg/m^3]
   return absoluteHumidityScaled;
 }
+// Calibration function
+void caliberate(int mq135_apin, double& R0) {
+    int m = 0;
+    double sensor_volt, RS_air;
+    double sensor_value = 0.0;
+
+    for (int x = 0; x < 5000; ++x) {
+        int analog_read = analogRead(mq135_apin);
+        if (m != 500) {
+            if (analog_read != 0 && analog_read <= 1023) {
+                sensor_value += analog_read;
+                ++m;
+            } else if (analog_read > 1023) {
+                analog_read = 1023;
+                sensor_value += analog_read;
+                ++m;
+            }
+        } else if (m == 500) {
+            sensor_value /= 500.0;
+            sensor_volt = sensor_value * (5.0 / 1023.0);
+            RS_air = ((5.0 * 20) / sensor_volt) - 10.0;
+
+            // Set appropriate ratio_air for each sensor based on the desired gas
+            double ratio_air = 3.7; // Assuming MQ135 for ammonia (NH3)
+
+            R0 = RS_air / ratio_air;
+            delay(500);
+            break;
+        }
+    }
+
+    Serial.println("Calibration Done");
+}
+
+// Function to calculate NH3 (ammonia) concentration
+double mq135_Calc(int mq135_apin, double R0) {
+    int loadRes = 20; // Assuming loadRes for MQ135 only
+    double m = -0.318;
+    double b = 1.13;
+    int sensorVal = analogRead(mq135_apin);
+
+    if (sensorVal != 0 && sensorVal <= 1023) {
+        double sensor_volt = sensorVal * (5.0 / 1023.0);
+        double RS_gas = ((5.0 * loadRes) / sensor_volt) - 10;
+        double ratio = RS_gas / R0;
+
+        if (ratio > 0) {
+            double ppm_log = (log10(ratio) - b) / m;
+            double ppm = pow(10, ppm_log);
+            double percentage = ppm / 10000;
+            return ppm;
+        }
+    } else if (sensorVal > 1023) {
+        sensorVal = 1023;
+        double sensor_volt = sensorVal * (5.0 / 1023.0);
+        double RS_gas = ((5.0 * loadRes) / sensor_volt) - 10;
+        double ratio = RS_gas / R0;
+
+        if (ratio > 0) {
+            double ppm_log = (log10(ratio) - b) / m;
+            double ppm = pow(10, ppm_log);
+            double percentage = ppm / 10000;
+            return ppm;
+        }
+    }
+
+    return 0.0; // If sensorVal == 0 or other conditions not met, return 0.0
+}
+
 void SendSensorData(){
   #pragma region GetDataSensor
   /*DHT11*/
@@ -84,9 +156,11 @@ void SendSensorData(){
   Serial.print(sgp.eCO2);
   Serial.println(" ppm");
   /* MQ135 */
-  float correctedPPM = mq135.getCorrectedPPM(t,h);
-  Serial.print(correctedPPM);
-  Serial.println("ppm");
+  double nh3_ppm = mq135_Calc(MQ135_pin, R0);
+
+    // Display the result on the Serial Monitor
+  Serial.print("NH3 Concentration (ppm): ");
+  Serial.println(nh3_ppm);
   /* Dust Sensor */
   float dustDensity = dustSensor.getDustDensity();
   Serial.println(dustDensity);
@@ -121,8 +195,8 @@ void SendSensorData(){
   /*MQ135*/
   display.setCursor(0, 40);  //oled display
   display.setTextColor(SH110X_WHITE);
-  display.print("Air:");
-  display.print(correctedPPM);
+  display.print("NH3:");
+  display.print(nh3_ppm);
   display.setTextSize(0.5);
   display.print(" ppm");
   /*Dust Sensor*/
@@ -154,16 +228,16 @@ void SendSensorData(){
     Serial.println("Upload fail");
   }
   /* SGP30 */
-  if (Firebase.setDouble(fbdo, "/SGP30_SenSor/TVOC", sgp.TVOC))
+  if (Firebase.setFloat(fbdo, "/SGP30_SenSor/TVOC", sgp.TVOC))
     Serial.println("Upload success");
   else
     Serial.println("Upload fail");
-  if (Firebase.setDouble(fbdo, "/SGP30_SenSor/eCO2", sgp.eCO2))
+  if (Firebase.setFloat(fbdo, "/SGP30_SenSor/eCO2", sgp.eCO2))
     Serial.println("Upload success");
   else
     Serial.println("Upload fail");
   /* MQ135 */
-  if (Firebase.setFloat(fbdo, "/MQ135", correctedPPM))
+  if (Firebase.setFloat(fbdo, "/MQ135", nh3_ppm))
     Serial.println("Upload success");
   else
     Serial.println("Upload fail");
@@ -244,7 +318,7 @@ void setup() {
   display.display();
   if (!sgp.begin()) {
     Serial.println("Sensor not found :(");
-    Firebase.setString(fbdo, "/Air_Sensor", "Sensor not found :(");
+    Firebase.setString(fbdo, "/SGP30_SenSor", "Sensor not found :(");
     display.setCursor(0, 5);
     display.setTextSize(1);
     display.setTextColor(SH110X_WHITE);
@@ -252,6 +326,7 @@ void setup() {
     display.display();
   }
   display.clearDisplay();
+  caliberate(MQ135_pin, R0);
 }
 
 void loop() {
