@@ -1,7 +1,8 @@
 #include <Arduino.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include <esp_adc_cal.h>
+#include "addons/TokenHelper.h"
+//Provide the RTDB payload printing info and other helper functions.
+#include "addons/RTDBHelper.h"
 /// --------- /////
 #include "Adafruit_SGP30.h"
 #include <SPI.h>
@@ -15,9 +16,15 @@
 #include <WiFi.h>
 #include <FirebaseESP32.h>
 
+
+
+
 // set nguong
-long variables[3] = { 1000, 1000, 1000 };
-// define sensor 
+int thresholdTOV = 500;
+int thresholdCO2 = 1000;
+int thresholdMQ135 = 70;
+int thresholdDust = 10;
+// define sensor
 #define DHT_Pin 5
 #define DHT_Type DHT11
 // dust sensor
@@ -46,14 +53,20 @@ double R0;
 #define WIFI_PASSWORD "qngai1215"
 // firebase
 #define FIREBASE_HOST "https://air-minotoring-default-rtdb.asia-southeast1.firebasedatabase.app/"
-#define FIREBASE_AUTH "QtGIWEUT92pXJVmWrtPEclYAF6jZw3KA9DIUXdRv"
+#define FIREBASE_AUTH "AIzaSyDSnijCeDSsrXzgTRYTi70El68oJb_0p-Q"
 //  call obj
 Adafruit_SH1106G display = Adafruit_SH1106G(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 DHT dht(DHT_Pin, DHT_Type);
 Adafruit_SGP30 sgp;
 //MQ135 mq135 = MQ135(MQ135_pin);
 SharpGP2Y10 dustSensor(voPin, ledPin);
+/*firebase*/
 FirebaseData fbdo;
+FirebaseConfig config;
+FirebaseAuth auth;
+unsigned long sendDataPrevMillis = 0;
+bool signupOK = false;
+
 // put function declarations here:
 uint32_t getAbsoluteHumidity(float temperature, float humidity) {
   // approximation formula from Sensirion SGP30 Driver Integration chapter 3.15
@@ -63,75 +76,74 @@ uint32_t getAbsoluteHumidity(float temperature, float humidity) {
 }
 // Calibration function
 void caliberate(int mq135_apin, double& R0) {
-    int m = 0;
-    double sensor_volt, RS_air;
-    double sensor_value = 0.0;
+  int m = 0;
+  double sensor_volt, RS_air;
+  double sensor_value = 0.0;
 
-    for (int x = 0; x < 5000; ++x) {
-        int analog_read = analogRead(mq135_apin);
-        if (m != 500) {
-            if (analog_read != 0 && analog_read <= 1023) {
-                sensor_value += analog_read;
-                ++m;
-            } else if (analog_read > 1023) {
-                analog_read = 1023;
-                sensor_value += analog_read;
-                ++m;
-            }
-        } else if (m == 500) {
-            sensor_value /= 500.0;
-            sensor_volt = sensor_value * (5.0 / 1023.0);
-            RS_air = ((5.0 * 20) / sensor_volt) - 10.0;
+  for (int x = 0; x < 5000; ++x) {
+    int analog_read = analogRead(mq135_apin);
+    if (m != 500) {
+      if (analog_read != 0 && analog_read <= 1023) {
+        sensor_value += analog_read;
+        ++m;
+      } else if (analog_read > 1023) {
+        analog_read = 1023;
+        sensor_value += analog_read;
+        ++m;
+      }
+    } else if (m == 500) {
+      sensor_value /= 500.0;
+      sensor_volt = sensor_value * (5.0 / 1023.0);
+      RS_air = ((5.0 * 20) / sensor_volt) - 10.0;
 
-            // Set appropriate ratio_air for each sensor based on the desired gas
-            double ratio_air = 3.7; // Assuming MQ135 for ammonia (NH3)
+      // Set appropriate ratio_air for each sensor based on the desired gas
+      double ratio_air = 3.7;  // Assuming MQ135 for ammonia (NH3)
 
-            R0 = RS_air / ratio_air;
-            delay(500);
-            break;
-        }
+      R0 = RS_air / ratio_air;
+      delay(500);
+      break;
     }
+  }
 
-    Serial.println("Calibration Done");
+  Serial.println("Calibration Done");
 }
-
 // Function to calculate NH3 (ammonia) concentration
 double mq135_Calc(int mq135_apin, double R0) {
-    int loadRes = 20; // Assuming loadRes for MQ135 only
-    double m = -0.318;
-    double b = 1.13;
-    int sensorVal = analogRead(mq135_apin);
+  int loadRes = 20;  // Assuming loadRes for MQ135 only
+  double m = -0.318;
+  double b = 1.13;
+  int sensorVal = analogRead(mq135_apin);
 
-    if (sensorVal != 0 && sensorVal <= 1023) {
-        double sensor_volt = sensorVal * (5.0 / 1023.0);
-        double RS_gas = ((5.0 * loadRes) / sensor_volt) - 10;
-        double ratio = RS_gas / R0;
+  if (sensorVal != 0 && sensorVal <= 1023) {
+    double sensor_volt = sensorVal * (5.0 / 1023.0);
+    double RS_gas = ((5.0 * loadRes) / sensor_volt) - 10;
+    double ratio = RS_gas / R0;
 
-        if (ratio > 0) {
-            double ppm_log = (log10(ratio) - b) / m;
-            double ppm = pow(10, ppm_log);
-            double percentage = ppm / 10000;
-            return ppm;
-        }
-    } else if (sensorVal > 1023) {
-        sensorVal = 1023;
-        double sensor_volt = sensorVal * (5.0 / 1023.0);
-        double RS_gas = ((5.0 * loadRes) / sensor_volt) - 10;
-        double ratio = RS_gas / R0;
-
-        if (ratio > 0) {
-            double ppm_log = (log10(ratio) - b) / m;
-            double ppm = pow(10, ppm_log);
-            double percentage = ppm / 10000;
-            return ppm;
-        }
+    if (ratio > 0) {
+      double ppm_log = (log10(ratio) - b) / m;
+      double ppm = pow(10, ppm_log);
+      double percentage = ppm / 10000;
+      return ppm;
     }
+  } else if (sensorVal > 1023) {
+    sensorVal = 1023;
+    double sensor_volt = sensorVal * (5.0 / 1023.0);
+    double RS_gas = ((5.0 * loadRes) / sensor_volt) - 10;
+    double ratio = RS_gas / R0;
 
-    return 0.0; // If sensorVal == 0 or other conditions not met, return 0.0
+    if (ratio > 0) {
+      double ppm_log = (log10(ratio) - b) / m;
+      double ppm = pow(10, ppm_log);
+      double percentage = ppm / 10000;
+      return ppm;
+    }
+  }
+
+  return 0.0;  // If sensorVal == 0 or other conditions not met, return 0.0
 }
 
-void SendSensorData(){
-  #pragma region GetDataSensor
+void SendSensorData() {
+#pragma region GetDataSensor
   /*DHT11*/
   float h = dht.readHumidity();
   float t = dht.readTemperature();
@@ -144,8 +156,8 @@ void SendSensorData(){
   Serial.print(F("%  Temperature: "));
   Serial.println(t);
   /* SGP30 */
-  sgp.setHumidity(getAbsoluteHumidity(t,h));
-  if(!sgp.IAQmeasure()){
+  sgp.setHumidity(getAbsoluteHumidity(t, h));
+  if (!sgp.IAQmeasure()) {
     Serial.println("Measurement failed");
     return;
   }
@@ -156,17 +168,17 @@ void SendSensorData(){
   Serial.print(sgp.eCO2);
   Serial.println(" ppm");
   /* MQ135 */
-  double nh3_ppm = mq135_Calc(MQ135_pin, R0);
+  float nh3_ppm = mq135_Calc(MQ135_pin, R0);
 
-    // Display the result on the Serial Monitor
+  // Display the result on the Serial Monitor
   Serial.print("NH3 Concentration (ppm): ");
   Serial.println(nh3_ppm);
   /* Dust Sensor */
   float dustDensity = dustSensor.getDustDensity();
   Serial.println(dustDensity);
-  #pragma endregion
-  /* Display oled */
-  #pragma region Display Oled
+#pragma endregion
+/* Display oled */
+#pragma region Display Oled
   /*DHT11*/
   display.clearDisplay();
   display.setCursor(0, 0);
@@ -207,58 +219,74 @@ void SendSensorData(){
   display.setTextSize(0.5);
   display.print(" ppm");
   display.display();
-  #pragma endregion
-  /* Send data to firebase */
-  #pragma region SendDataToFirebase
+#pragma endregion
+/* Send data to firebase */
+#pragma region SendDataToFirebase
   /*DHT11*/
-  if (Firebase.setFloat(fbdo, "/DHT11/temp", t))
-  {
+  if (Firebase.setFloat(fbdo, "/DHT11/temp", t)) {
     Serial.println("Upload success");
-  }
-  else
-  {
+  } else {
     Serial.println("Upload fail");
   }
-  if (Firebase.setFloat(fbdo, "/DHT11/hum", h))
-  {
+  if (Firebase.setFloat(fbdo, "/DHT11/hum", h)) {
     Serial.println("Upload success");
-  }
-  else
-  {
+  } else {
     Serial.println("Upload fail");
   }
   /* SGP30 */
-  if (Firebase.setFloat(fbdo, "/SGP30_SenSor/TVOC", sgp.TVOC))
+  if (Firebase.setFloat(fbdo, "/SGP30_SenSor/Data/TVOC", sgp.TVOC))
     Serial.println("Upload success");
   else
     Serial.println("Upload fail");
-  if (Firebase.setFloat(fbdo, "/SGP30_SenSor/eCO2", sgp.eCO2))
+  if (Firebase.setFloat(fbdo, "/SGP30_SenSor/Data/eCO2", sgp.eCO2))
     Serial.println("Upload success");
   else
     Serial.println("Upload fail");
+
   /* MQ135 */
-  if (Firebase.setFloat(fbdo, "/MQ135", nh3_ppm))
+  if (Firebase.setFloat(fbdo, "/MQ135/Data", nh3_ppm))
     Serial.println("Upload success");
   else
     Serial.println("Upload fail");
-  if (Firebase.setFloat(fbdo, "/DustSenSor", dustDensity))
+
+  if (Firebase.setFloat(fbdo, "/DustSenSor/Data", dustDensity))
     Serial.println("Upload success");
   else
     Serial.println("Upload fail");
-  #pragma endregion
+  /*set nguong*/
+  if (Firebase.setInt(fbdo, "/SGP30_SenSor/Thresh_Hold/TVOC", thresholdTOV)) {
+    Serial.println("TVOC Threshold updated successfully");
+  } else {
+    Serial.println("Failed to update TVOC Threshold");
+  }
+
+  if (Firebase.setInt(fbdo, "/SGP30_SenSor/Thresh_Hold/eCO2", thresholdCO2)) {
+    Serial.println("eCO2 Threshold updated successfully");
+  } else {
+    Serial.println("Failed to update eCO2 Threshold");
+  }
+
+  if (Firebase.setInt(fbdo, "/MQ135/Thresh_Hold", thresholdMQ135)) {
+    Serial.println("MQ135 Threshold updated successfully");
+  } else {
+    Serial.println("Failed to update MQ135 Threshold");
+  }
+
+  if (Firebase.setInt(fbdo, "/DustSenSor/Thresh_Hold", thresholdDust)) {
+    Serial.println("Dust Threshold updated successfully");
+  } else {
+    Serial.println("Failed to update Dust Threshold");
+  }
+
+#pragma endregion
 }
-void handleVariableChange(long &variable) {
+void handleVariableChange(int& variable) {
   noInterrupts();
   long val = encoderValue;
   interrupts();
 
   if (val != 0) {
     variable += (val > 0) ? 1 : -1;
-    Serial.print("Variable ");
-    Serial.print(selectedThreshSensor + 1);
-    Serial.print(": ");
-    Serial.println(variables[selectedThreshSensor]);
-
     noInterrupts();
     encoderValue = 0;
     interrupts();
@@ -267,7 +295,7 @@ void handleVariableChange(long &variable) {
   if (buttonState != lastButtonState) {
     if (!buttonState) {
       selectedThreshSensor++;
-      if (selectedThreshSensor >= 3) {
+      if (selectedThreshSensor >= 4) {
         selectedThreshSensor = 0;
       }
       Serial.print("Selected Sensor: ");
@@ -276,6 +304,7 @@ void handleVariableChange(long &variable) {
     lastButtonState = buttonState;
   }
 }
+
 void handleEncoder() {
   aState = digitalRead(CLK_PIN);
   bState = digitalRead(DT_PIN);
@@ -308,7 +337,16 @@ void setup() {
   Serial.print("Connected with IP: ");
   Serial.println(WiFi.localIP());
   Serial.println();
-  Firebase.begin(FIREBASE_HOST, FIREBASE_AUTH);
+  config.api_key = FIREBASE_AUTH;
+  config.database_url = FIREBASE_HOST;
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("ok");
+    signupOK = true;
+  } else {
+    Serial.printf("%s\n", config.signer.signupError.message.c_str());
+  }
+  config.token_status_callback = tokenStatusCallback;
+  Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
   Firebase.setReadTimeout(fbdo, 1000 * 60);
   Firebase.setwriteSizeLimit(fbdo, "tiny");
@@ -330,8 +368,22 @@ void setup() {
 }
 
 void loop() {
+  if (selectedThreshSensor == 0) {
+    handleVariableChange(thresholdTOV);
+  }
+  if (selectedThreshSensor == 1) {
+    handleVariableChange(thresholdCO2);
+  }
+  if (selectedThreshSensor == 2) {
+    handleVariableChange(thresholdMQ135);
+  }
+  if (selectedThreshSensor == 3) {
+    handleVariableChange(thresholdDust);
+  }
   // put your main code here, to run repeatedly:
-  SendSensorData();
-  delay(1000);
-  handleVariableChange(variables[selectedThreshSensor]);
+  if (Firebase.ready() && signupOK && (millis() - sendDataPrevMillis > 4000 || sendDataPrevMillis == 0)) {
+
+    SendSensorData();
+    sendDataPrevMillis = millis();
+  }
 }
