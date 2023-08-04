@@ -15,9 +15,13 @@
 #include "SharpGP2Y10.h"
 #include <WiFi.h>
 #include <FirebaseESP32.h>
+#include <WiFiClient.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <Update.h>
 
 
-
+#define buzzer 13
 
 // set nguong
 int thresholdTOV = 500;
@@ -25,15 +29,15 @@ int thresholdCO2 = 1000;
 int thresholdMQ135 = 70;
 int thresholdDust = 10;
 // define sensor
-#define DHT_Pin 5
+#define DHT_Pin 26
 #define DHT_Type DHT11
 // dust sensor
 #define voPin 36
-#define ledPin 14
+#define ledPin 34
 // ky040
-const int CLK_PIN = 16;  // KY-040 CLK pin
+const int CLK_PIN = 14;  // KY-040 CLK pin
 const int DT_PIN = 27;   // KY-040 DT pin
-const int SW_PIN = 17;   // KY-040 SW pin
+const int SW_PIN = 16;   // KY-040 SW pin
 volatile bool aState;
 volatile bool bState;
 volatile bool buttonState;
@@ -49,8 +53,98 @@ double R0;
 #define OLED_RESET 4         // Reset pin # (or -1 if sharing Arduino reset pin)
 #define SCREEN_ADDRESS 0x3C  // 0x3D for 128x64, 0x3C for 128x32
 // ssid and passwork
+const char* host = "esp32";
 #define WIFI_SSID "QN12-15"
 #define WIFI_PASSWORD "qngai1215"
+WebServer server(80);
+/*
+ * Login page
+ */
+const char* loginIndex = 
+ "<form name='loginForm'>"
+    "<table width='20%' bgcolor='A09F9F' align='center'>"
+        "<tr>"
+            "<td colspan=2>"
+                "<center><font size=4><b>ESP32 Login Page</b></font></center>"
+                "<br>"
+            "</td>"
+            "<br>"
+            "<br>"
+        "</tr>"
+        "<td>Username:</td>"
+        "<td><input type='text' size=25 name='userid'><br></td>"
+        "</tr>"
+        "<br>"
+        "<br>"
+        "<tr>"
+            "<td>Password:</td>"
+            "<td><input type='Password' size=25 name='pwd'><br></td>"
+            "<br>"
+            "<br>"
+        "</tr>"
+        "<tr>"
+            "<td><input type='submit' onclick='check(this.form)' value='Login'></td>"
+        "</tr>"
+    "</table>"
+"</form>"
+"<script>"
+    "function check(form)"
+    "{"
+    "if(form.userid.value=='admin' && form.pwd.value=='admin')"
+    "{"
+    "window.open('/serverIndex')"
+    "}"
+    "else"
+    "{"
+    " alert('Error Password or Username')/*displays error message*/"
+    "}"
+    "}"
+"</script>";
+ 
+/*
+ * Server Index Page
+ */
+ 
+const char* serverIndex = 
+"<script src='https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js'></script>"
+"<form method='POST' action='#' enctype='multipart/form-data' id='upload_form'>"
+   "<input type='file' name='update'>"
+        "<input type='submit' value='Update'>"
+    "</form>"
+ "<div id='prg'>progress: 0%</div>"
+ "<script>"
+  "$('form').submit(function(e){"
+  "e.preventDefault();"
+  "var form = $('#upload_form')[0];"
+  "var data = new FormData(form);"
+  " $.ajax({"
+  "url: '/update',"
+  "type: 'POST',"
+  "data: data,"
+  "contentType: false,"
+  "processData:false,"
+  "xhr: function() {"
+  "var xhr = new window.XMLHttpRequest();"
+  "xhr.upload.addEventListener('progress', function(evt) {"
+  "if (evt.lengthComputable) {"
+  "var per = evt.loaded / evt.total;"
+  "$('#prg').html('progress: ' + Math.round(per*100) + '%');"
+  "}"
+  "}, false);"
+  "return xhr;"
+  "},"
+  "success:function(d, s) {"
+  "console.log('success!')" 
+ "},"
+ "error: function (a, b, c) {"
+ "}"
+ "});"
+ "});"
+ "</script>";
+
+/*
+ * setup function
+ */
 // firebase
 #define FIREBASE_HOST "https://air-minotoring-default-rtdb.asia-southeast1.firebasedatabase.app/"
 #define FIREBASE_AUTH "AIzaSyDSnijCeDSsrXzgTRYTi70El68oJb_0p-Q"
@@ -211,6 +305,7 @@ void SendSensorData() {
   display.print(nh3_ppm);
   display.setTextSize(0.5);
   display.print(" ppm");
+  
   /*Dust Sensor*/
   display.setCursor(0, 50);  //oled display
   display.setTextColor(SH110X_WHITE);
@@ -219,6 +314,7 @@ void SendSensorData() {
   display.setTextSize(0.5);
   display.print(" ppm");
   display.display();
+  
 #pragma endregion
 /* Send data to firebase */
 #pragma region SendDataToFirebase
@@ -279,6 +375,28 @@ void SendSensorData() {
   }
 
 #pragma endregion
+#pragma region canh bao
+if(nh3_ppm > thresholdMQ135){
+  digitalWrite(buzzer,1);
+  delay(5000);
+  digitalWrite(buzzer,0);
+}
+if(sgp.TVOC > thresholdTOV){
+  digitalWrite(buzzer,1);
+  delay(5000);
+  digitalWrite(buzzer,0);
+}
+if(sgp.eCO2 > thresholdCO2){
+  digitalWrite(buzzer,1);
+  delay(5000);
+  digitalWrite(buzzer,0);
+}
+if(dustDensity > thresholdDust){
+  digitalWrite(buzzer,1);
+  delay(5000);
+  digitalWrite(buzzer,0);
+}
+#pragma endregion
 }
 void handleVariableChange(int& variable) {
   noInterrupts();
@@ -325,6 +443,7 @@ void setup() {
   pinMode(CLK_PIN, INPUT_PULLUP);
   pinMode(DT_PIN, INPUT_PULLUP);
   pinMode(SW_PIN, INPUT_PULLUP);
+  pinMode(buzzer,OUTPUT);
   attachInterrupt(digitalPinToInterrupt(CLK_PIN), handleEncoder, CHANGE);
   attachInterrupt(digitalPinToInterrupt(SW_PIN), handleButton, CHANGE);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -333,10 +452,54 @@ void setup() {
     Serial.print(".");
     delay(300);
   }
+  
   Serial.println();
   Serial.print("Connected with IP: ");
   Serial.println(WiFi.localIP());
   Serial.println();
+  /*use mdns for host name resolution*/
+  if (!MDNS.begin(host)) { //http://esp32.local
+    Serial.println("Error setting up MDNS responder!");
+    while (1) {
+      delay(1000);
+    }
+  }
+  Serial.println("mDNS responder started");
+  /*return index page which is stored in serverIndex */
+  server.on("/", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html", loginIndex);
+  });
+  server.on("/serverIndex", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html", serverIndex);
+  });
+  /*handling uploading firmware file */
+  server.on("/update", HTTP_POST, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
+    ESP.restart();
+  }, []() {
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+      Serial.printf("Update: %s\n", upload.filename.c_str());
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { //start with max available size
+        Update.printError(Serial);
+      }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+      /* flashing firmware to ESP*/
+      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+        Update.printError(Serial);
+      }
+    } else if (upload.status == UPLOAD_FILE_END) {
+      if (Update.end(true)) { //true to set the size to the current progress
+        Serial.printf("Update Success: %u\nRebooting...\n", upload.totalSize);
+      } else {
+        Update.printError(Serial);
+      }
+    }
+  });
+  server.begin();
   config.api_key = FIREBASE_AUTH;
   config.database_url = FIREBASE_HOST;
   if (Firebase.signUp(&config, &auth, "", "")) {
@@ -386,4 +549,6 @@ void loop() {
     SendSensorData();
     sendDataPrevMillis = millis();
   }
+  server.handleClient();
+  delay(1);
 }
