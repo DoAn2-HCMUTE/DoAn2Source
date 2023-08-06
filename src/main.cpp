@@ -19,13 +19,14 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Update.h>
-
+#include <WiFiManager.h> 
+#include <DNSServer.h>
 
 #define buzzer 13
 
 // set nguong
-int thresholdTOV = 500;
-int thresholdCO2 = 1000;
+int thresholdTOV = 600;
+int thresholdCO2 = 1200;
 int thresholdMQ135 = 70;
 int thresholdDust = 10;
 // define sensor
@@ -54,8 +55,7 @@ double R0;
 #define SCREEN_ADDRESS 0x3C  // 0x3D for 128x64, 0x3C for 128x32
 // ssid and passwork
 const char* host = "esp32";
-#define WIFI_SSID "QN12-15"
-#define WIFI_PASSWORD "qngai1215"
+
 WebServer server(80);
 /*
  * Login page
@@ -440,18 +440,15 @@ void handleButton() {
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200);
+  WiFiManager wifiManager;
+  wifiManager.autoConnect("DoAn2","password");;
+  Serial.println("Connected.");
   pinMode(CLK_PIN, INPUT_PULLUP);
   pinMode(DT_PIN, INPUT_PULLUP);
   pinMode(SW_PIN, INPUT_PULLUP);
   pinMode(buzzer,OUTPUT);
   attachInterrupt(digitalPinToInterrupt(CLK_PIN), handleEncoder, CHANGE);
   attachInterrupt(digitalPinToInterrupt(SW_PIN), handleButton, CHANGE);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to Wi-Fi");
-  while (WiFi.status() != WL_CONNECTED) {
-    Serial.print(".");
-    delay(300);
-  }
   
   Serial.println();
   Serial.print("Connected with IP: ");
